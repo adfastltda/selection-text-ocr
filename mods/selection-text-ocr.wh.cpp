@@ -2,11 +2,17 @@
 // @id              selection-text-ocr
 // @name            Selection Text OCR
 // @description     Global hotkey to capture a screen region and copy extracted text to the clipboard
-// @version         1.0.1
-// @author          windhawk-user
+// @version         1.0.2
+// @author          adfastltda
+// @github          https://github.com/adfastltda/selection-text-ocr
+// @homepage        https://github.com/adfastltda/selection-text-ocr
 // @include         windhawk.exe
 // @compilerOptions -lgdi32 -lmsimg32 -lole32
+// @license         MIT
 // ==/WindhawkMod==
+
+// For bug reports, support, and contributions:
+// https://github.com/adfastltda/selection-text-ocr
 
 // ==WindhawkModReadme==
 /*
@@ -15,6 +21,12 @@
 Capture a screen region with a global hotkey and copy the recognized text to the clipboard.
 
 Inspired by PowerToys Text Extractor / Text Grab.
+
+## Support and development
+
+- **Repository:** https://github.com/adfastltda/selection-text-ocr
+- **Issues:** report bugs or request features on GitHub Issues
+- **Contributions:** pull requests are welcome on GitHub
 
 ## Usage
 

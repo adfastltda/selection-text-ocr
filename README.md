@@ -67,6 +67,14 @@ O mod roda como um **tool mod** em um processo dedicado do `windhawk.exe`. Ao pr
 - O OCR usa o Windows PowerShell clássico (`powershell.exe`), não o PowerShell 7
 - Selecões muito pequenas são ignoradas
 
+## Apoio e desenvolvimento
+
+Repositório oficial: [github.com/adfastltda/selection-text-ocr](https://github.com/adfastltda/selection-text-ocr)
+
+- **Suporte:** abra uma issue no GitHub para relatar problemas ou pedir ajuda
+- **Contribuições:** pull requests são bem-vindos para melhorias e correções
+- **Código-fonte:** disponível no repositório acima
+
 ## Licença
 
 MIT
