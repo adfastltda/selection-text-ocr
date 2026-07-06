@@ -2,7 +2,7 @@
 // @id              selection-text-ocr
 // @name            Selection Text OCR
 // @description     Global hotkey to capture a screen region and copy extracted text to the clipboard
-// @version         1.0.2
+// @version         1.0.3
 // @author          adfastltda
 // @github          https://github.com/adfastltda/selection-text-ocr
 // @homepage        https://github.com/adfastltda/selection-text-ocr
@@ -89,17 +89,154 @@ namespace {
 
 constexpr UINT kHotkeyId = 1;
 constexpr wchar_t kOverlayClassName[] = L"WindhawkSelectionTextOcrOverlay";
+constexpr wchar_t kHotkeyClassName[] = L"WindhawkSelectionTextOcrHotkey";
 
-HANDLE g_hThread = nullptr;
-DWORD g_threadId = 0;
-HANDLE g_hReadyEvent = nullptr;
-std::atomic<bool> g_stopHotkeyThread{false};
+HWND g_hotkeyHwnd = nullptr;
+HANDLE g_captureThread = nullptr;
+std::atomic<bool> g_captureInProgress{false};
+std::atomic<bool> g_stopMessageLoop{false};
 
 UINT g_hotkeyModifiers = MOD_CONTROL | MOD_SHIFT;
 UINT g_hotkeyKey = 'O';
 wchar_t g_ocrLanguage[32] = L"pt-BR";
 bool g_showResultDialog = false;
 int g_minimumSelectionSize = 8;
+
+void StartCaptureWorkflow();
+
+//=============================================================================
+// Hotkey window (global shortcut via main-thread message loop)
+//=============================================================================
+
+void UnregisterGlobalHotkey() {
+    if (g_hotkeyHwnd) {
+        UnregisterHotKey(g_hotkeyHwnd, kHotkeyId);
+    }
+}
+
+bool RegisterGlobalHotkey() {
+    if (!g_hotkeyHwnd) {
+        return false;
+    }
+
+    UnregisterGlobalHotkey();
+
+    const BOOL registered =
+        RegisterHotKey(g_hotkeyHwnd, kHotkeyId, g_hotkeyModifiers | MOD_NOREPEAT, g_hotkeyKey);
+    if (!registered) {
+        Wh_Log(L"RegisterHotKey failed: %lu", GetLastError());
+        return false;
+    }
+
+    Wh_Log(L"Global hotkey registered: modifiers=0x%X key=0x%X", g_hotkeyModifiers, g_hotkeyKey);
+    return true;
+}
+
+DWORD WINAPI CaptureThreadProc(LPVOID) {
+    StartCaptureWorkflow();
+    g_captureInProgress = false;
+    return 0;
+}
+
+void StartCaptureOnWorkerThread() {
+    if (g_captureInProgress.exchange(true)) {
+        Wh_Log(L"Capture already in progress, ignoring hotkey");
+        return;
+    }
+
+    if (g_captureThread) {
+        WaitForSingleObject(g_captureThread, INFINITE);
+        CloseHandle(g_captureThread);
+        g_captureThread = nullptr;
+    }
+
+    g_captureThread = CreateThread(nullptr, 0, CaptureThreadProc, nullptr, 0, nullptr);
+    if (!g_captureThread) {
+        g_captureInProgress = false;
+        Wh_Log(L"Failed to start capture thread: %lu", GetLastError());
+    }
+}
+
+LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+        case WM_HOTKEY:
+            if (wParam == kHotkeyId) {
+                Wh_Log(L"Global hotkey pressed");
+                StartCaptureOnWorkerThread();
+            }
+            return 0;
+
+        case WM_DESTROY:
+            UnregisterGlobalHotkey();
+            PostQuitMessage(0);
+            return 0;
+
+        default:
+            return DefWindowProc(hwnd, message, wParam, lParam);
+    }
+}
+
+bool CreateHotkeyWindow() {
+    static bool classRegistered = false;
+    if (!classRegistered) {
+        WNDCLASSEXW windowClass{
+            .cbSize = sizeof(WNDCLASSEXW),
+            .lpfnWndProc = HotkeyWndProc,
+            .hInstance = GetModuleHandle(nullptr),
+            .lpszClassName = kHotkeyClassName,
+        };
+        if (!RegisterClassExW(&windowClass)) {
+            Wh_Log(L"RegisterClassExW failed: %lu", GetLastError());
+            return false;
+        }
+        classRegistered = true;
+    }
+
+    if (g_hotkeyHwnd) {
+        return true;
+    }
+
+    g_hotkeyHwnd = CreateWindowExW(0, kHotkeyClassName, L"Selection Text OCR Hotkey", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                                   nullptr, GetModuleHandle(nullptr), nullptr);
+    if (!g_hotkeyHwnd) {
+        Wh_Log(L"CreateWindowExW failed: %lu", GetLastError());
+        return false;
+    }
+
+    return RegisterGlobalHotkey();
+}
+
+void DestroyHotkeyWindow() {
+    UnregisterGlobalHotkey();
+
+    if (g_captureThread) {
+        WaitForSingleObject(g_captureThread, INFINITE);
+        CloseHandle(g_captureThread);
+        g_captureThread = nullptr;
+    }
+
+    if (g_hotkeyHwnd) {
+        DestroyWindow(g_hotkeyHwnd);
+        g_hotkeyHwnd = nullptr;
+    }
+}
+
+void RunMainMessageLoop() {
+    Wh_Log(L"Main message loop started");
+
+    MSG message{};
+    while (!g_stopMessageLoop) {
+        const BOOL result = GetMessage(&message, nullptr, 0, 0);
+        if (result == 0 || result == -1) {
+            break;
+        }
+
+        TranslateMessage(&message);
+        DispatchMessage(&message);
+    }
+
+    Wh_Log(L"Main message loop exiting");
+}
 
 //=============================================================================
 // Settings helpers
@@ -802,17 +939,18 @@ bool CaptureRegion(RECT* outSelection) {
     }
 
     g_captureState.hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kOverlayClassName, L"Selection Text OCR", WS_POPUP, screen.x, screen.y,
-        screen.width, screen.height, nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kOverlayClassName, L"Selection Text OCR",
+        WS_POPUP, screen.x, screen.y, screen.width, screen.height, nullptr, nullptr, GetModuleHandle(nullptr),
+        nullptr);
     if (!g_captureState.hwnd) {
         DeleteObject(g_captureState.screenshot);
         g_captureState.screenshot = nullptr;
         return false;
     }
 
-    ShowWindow(g_captureState.hwnd, SW_SHOW);
+    SetWindowPos(g_captureState.hwnd, HWND_TOPMOST, screen.x, screen.y, screen.width, screen.height,
+                 SWP_SHOWWINDOW | SWP_NOACTIVATE);
     UpdateWindow(g_captureState.hwnd);
-    SetForegroundWindow(g_captureState.hwnd);
 
     MSG message{};
     while (!g_captureState.completed && !g_captureState.cancelled) {
@@ -911,114 +1049,30 @@ void StartCaptureWorkflow() {
 }
 
 //=============================================================================
-// Hotkey thread
-//=============================================================================
-
-DWORD WINAPI HotkeyThreadProc(LPVOID) {
-    g_threadId = GetCurrentThreadId();
-    Wh_Log(L"Hotkey thread started");
-
-    MSG message{};
-    PeekMessage(&message, nullptr, 0, 0, PM_NOREMOVE);
-    SetEvent(g_hReadyEvent);
-
-    const BOOL registered =
-        RegisterHotKey(nullptr, kHotkeyId, g_hotkeyModifiers | MOD_NOREPEAT, g_hotkeyKey);
-    if (!registered) {
-        Wh_Log(L"RegisterHotKey failed: %lu", GetLastError());
-    } else {
-        Wh_Log(L"Hotkey registered: modifiers=0x%X key=0x%X", g_hotkeyModifiers, g_hotkeyKey);
-    }
-
-    while (!g_stopHotkeyThread) {
-        const DWORD waitResult = MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
-        if (waitResult != WAIT_OBJECT_0) {
-            continue;
-        }
-
-        while (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
-            if (message.message == WM_QUIT) {
-                goto cleanup;
-            }
-
-            if (message.message == WM_HOTKEY && message.wParam == kHotkeyId) {
-                Wh_Log(L"Hotkey pressed, starting capture");
-                StartCaptureWorkflow();
-            }
-        }
-    }
-
-cleanup:
-    UnregisterHotKey(nullptr, kHotkeyId);
-    Wh_Log(L"Hotkey thread exiting");
-    return 0;
-}
-
-bool StartHotkeyThread() {
-    if (g_hThread) {
-        return true;
-    }
-
-    g_hReadyEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-    if (!g_hReadyEvent) {
-        return false;
-    }
-
-    g_stopHotkeyThread = false;
-    g_hThread = CreateThread(nullptr, 0, HotkeyThreadProc, nullptr, 0, &g_threadId);
-    if (!g_hThread) {
-        CloseHandle(g_hReadyEvent);
-        g_hReadyEvent = nullptr;
-        return false;
-    }
-
-    WaitForSingleObject(g_hReadyEvent, INFINITE);
-    return true;
-}
-
-void StopHotkeyThread() {
-    if (!g_hThread) {
-        return;
-    }
-
-    g_stopHotkeyThread = true;
-    if (g_threadId) {
-        PostThreadMessage(g_threadId, WM_QUIT, 0, 0);
-    }
-
-    WaitForSingleObject(g_hThread, 5000);
-    CloseHandle(g_hThread);
-    g_hThread = nullptr;
-    g_threadId = 0;
-
-    if (g_hReadyEvent) {
-        CloseHandle(g_hReadyEvent);
-        g_hReadyEvent = nullptr;
-    }
-}
-
-//=============================================================================
 // Windhawk tool mod entry points
 //=============================================================================
 
 BOOL WhTool_ModInit() {
     Wh_Log(L"Selection Text OCR initializing");
     LoadSettings();
-    if (!StartHotkeyThread()) {
-        Wh_Log(L"Failed to start hotkey thread");
+    if (!CreateHotkeyWindow()) {
+        Wh_Log(L"Failed to create hotkey window");
         return FALSE;
     }
     return TRUE;
 }
 
 void WhTool_ModUninit() {
-    StopHotkeyThread();
+    g_stopMessageLoop = true;
+    if (g_hotkeyHwnd) {
+        PostMessage(g_hotkeyHwnd, WM_CLOSE, 0, 0);
+    }
+    DestroyHotkeyWindow();
 }
 
 void WhTool_ModSettingsChanged() {
-    StopHotkeyThread();
     LoadSettings();
-    StartHotkeyThread();
+    RegisterGlobalHotkey();
 }
 
 }  // namespace
@@ -1031,7 +1085,8 @@ bool g_isToolModProcessLauncher;
 HANDLE g_toolModProcessMutex;
 
 void WINAPI EntryPoint_Hook() {
-    Wh_Log(L">");
+    Wh_Log(L"Entry point hook - starting global hotkey message loop");
+    RunMainMessageLoop();
     ExitThread(0);
 }
 
