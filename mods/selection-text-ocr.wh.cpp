@@ -2,7 +2,7 @@
 // @id              selection-text-ocr
 // @name            Selection Text OCR
 // @description     Global hotkey to capture a screen region and copy extracted text to the clipboard
-// @version         1.0.3
+// @version         1.0.4
 // @author          adfastltda
 // @github          https://github.com/adfastltda/selection-text-ocr
 // @homepage        https://github.com/adfastltda/selection-text-ocr
@@ -745,6 +745,50 @@ struct CaptureState {
 };
 
 CaptureState g_captureState;
+HHOOK g_keyboardHook = nullptr;
+
+void CancelCaptureOverlay() {
+    g_captureState.cancelled = true;
+    if (g_captureState.dragging) {
+        ReleaseCapture();
+        g_captureState.dragging = false;
+    }
+    if (g_captureState.hwnd) {
+        PostMessage(g_captureState.hwnd, WM_CLOSE, 0, 0);
+    }
+}
+
+LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+        const auto* keyboard = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+        if (keyboard->vkCode == VK_ESCAPE && g_captureState.hwnd) {
+            CancelCaptureOverlay();
+            return 1;
+        }
+    }
+    return CallNextHookEx(g_keyboardHook, nCode, wParam, lParam);
+}
+
+bool InstallCaptureKeyboardHook() {
+    if (g_keyboardHook) {
+        return true;
+    }
+
+    g_keyboardHook =
+        SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
+    if (!g_keyboardHook) {
+        Wh_Log(L"SetWindowsHookEx failed: %lu", GetLastError());
+        return false;
+    }
+    return true;
+}
+
+void UninstallCaptureKeyboardHook() {
+    if (g_keyboardHook) {
+        UnhookWindowsHookEx(g_keyboardHook);
+        g_keyboardHook = nullptr;
+    }
+}
 
 RECT NormalizeRect(int x1, int y1, int x2, int y2) {
     RECT rect{};
@@ -888,10 +932,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             return 0;
 
         case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
             if (wParam == VK_ESCAPE) {
-                g_captureState.cancelled = true;
-                DestroyWindow(hwnd);
+                CancelCaptureOverlay();
             }
+            return 0;
+
+        case WM_CLOSE:
+            g_captureState.cancelled = true;
+            if (g_captureState.dragging) {
+                ReleaseCapture();
+                g_captureState.dragging = false;
+            }
+            DestroyWindow(hwnd);
             return 0;
 
         case WM_DESTROY:
@@ -952,6 +1005,8 @@ bool CaptureRegion(RECT* outSelection) {
                  SWP_SHOWWINDOW | SWP_NOACTIVATE);
     UpdateWindow(g_captureState.hwnd);
 
+    InstallCaptureKeyboardHook();
+
     MSG message{};
     while (!g_captureState.completed && !g_captureState.cancelled) {
         if (!GetMessage(&message, nullptr, 0, 0)) {
@@ -960,6 +1015,8 @@ bool CaptureRegion(RECT* outSelection) {
         TranslateMessage(&message);
         DispatchMessage(&message);
     }
+
+    UninstallCaptureKeyboardHook();
 
     if (g_captureState.cancelled || !g_captureState.completed) {
         if (IsWindow(g_captureState.hwnd)) {
